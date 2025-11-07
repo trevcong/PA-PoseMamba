@@ -1,4 +1,11 @@
 import torch
+import sys
+import os
+
+# Add kernels path for CUDA extensions (especially for ARM/aarch64 builds)
+_kernels_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'kernels', 'selective_scan')
+if os.path.exists(_kernels_path) and _kernels_path not in sys.path:
+    sys.path.insert(0, _kernels_path)
 
 # pytorch cross scan =============
 class CrossScan(torch.autograd.Function):
@@ -320,12 +327,35 @@ class CrossMerge_Ab_1direction(torch.autograd.Function):
 
 
 # import selective scan ==============================
+selective_scan_cuda_oflex = None
 try:
     import selective_scan_cuda_oflex
 except Exception as e:
-    ...
-    # print(f"WARNING: can not import selective_scan_cuda_oflex.", flush=True)
-    # print(e, flush=True)
+    # Try importing from the kernels directory directly using importlib
+    try:
+        _kernels_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'kernels', 'selective_scan')
+        if os.path.exists(_kernels_dir):
+            # Add the directory to sys.path so Python can find the .so file
+            if _kernels_dir not in sys.path:
+                sys.path.insert(0, _kernels_dir)
+            # Try importing again after adding to path
+            try:
+                import selective_scan_cuda_oflex
+            except:
+                # If that still fails, try to find and load the .so file directly
+                import importlib.util
+                import glob
+                _so_files = glob.glob(os.path.join(_kernels_dir, 'selective_scan_cuda_oflex*.so'))
+                if _so_files:
+                    _so_file = _so_files[0]  # Use the first matching .so file
+                    spec = importlib.util.spec_from_file_location('selective_scan_cuda_oflex', _so_file)
+                    if spec and spec.loader:
+                        selective_scan_cuda_oflex = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(selective_scan_cuda_oflex)
+    except Exception as e2:
+        ...
+        # print(f"WARNING: can not import selective_scan_cuda_oflex.", flush=True)
+        # print(e2, flush=True)
 
 try:
     import selective_scan_cuda_core
@@ -462,27 +492,40 @@ class SelectiveScanCore(torch.autograd.Function):
     @staticmethod
     @torch.cuda.amp.custom_fwd
     def forward(ctx, u, delta, A, B, C, D=None, delta_bias=None, delta_softplus=False, nrows=1, backnrows=1, oflex=True):
-        ctx.delta_softplus = delta_softplus
-        out, x, *rest = selective_scan_cuda_core.fwd(u, delta, A, B, C, D, delta_bias, delta_softplus, 1)
-        ctx.save_for_backward(u, delta, A, B, C, D, delta_bias, x)
-        return out
+        # Fallback to SelectiveScanOflex if selective_scan_cuda_core is not available
+        try:
+            ctx.delta_softplus = delta_softplus
+            out, x, *rest = selective_scan_cuda_core.fwd(u, delta, A, B, C, D, delta_bias, delta_softplus, 1)
+            ctx.save_for_backward(u, delta, A, B, C, D, delta_bias, x)
+            return out
+        except (NameError, AttributeError):
+            # Fallback to SelectiveScanOflex if selective_scan_cuda_core is not available
+            return SelectiveScanOflex.apply(u, delta, A, B, C, D, delta_bias, delta_softplus, nrows, backnrows, oflex)
     
     @staticmethod
     @torch.cuda.amp.custom_bwd
     def backward(ctx, dout, *args):
-        u, delta, A, B, C, D, delta_bias, x = ctx.saved_tensors
-        if dout.stride(-1) != 1:
-            dout = dout.contiguous()
-        du, ddelta, dA, dB, dC, dD, ddelta_bias, *rest = selective_scan_cuda_core.bwd(
-            u, delta, A, B, C, D, delta_bias, dout, x, ctx.delta_softplus, 1
-        )
-        return (du, ddelta, dA, dB, dC, dD, ddelta_bias, None, None, None, None)
+        # Fallback to SelectiveScanOflex if selective_scan_cuda_core is not available
+        try:
+            u, delta, A, B, C, D, delta_bias, x = ctx.saved_tensors
+            if dout.stride(-1) != 1:
+                dout = dout.contiguous()
+            du, ddelta, dA, dB, dC, dD, ddelta_bias, *rest = selective_scan_cuda_core.bwd(
+                u, delta, A, B, C, D, delta_bias, dout, x, ctx.delta_softplus, 1
+            )
+            return (du, ddelta, dA, dB, dC, dD, ddelta_bias, None, None, None, None)
+        except (NameError, AttributeError):
+            # This shouldn't be called if we used fallback in forward, but handle gracefully
+            return (None,) * 11
 
 
 class SelectiveScanOflex(torch.autograd.Function):
     @staticmethod
     @torch.cuda.amp.custom_fwd
     def forward(ctx, u, delta, A, B, C, D=None, delta_bias=None, delta_softplus=False, nrows=1, backnrows=1, oflex=True):
+        if selective_scan_cuda_oflex is None:
+            raise RuntimeError("selective_scan_cuda_oflex module is not available. Please ensure the CUDA extension is properly compiled and installed.")
+        
         ctx.delta_softplus = delta_softplus
         out, x, *rest = selective_scan_cuda_oflex.fwd(u, delta, A, B, C, D, delta_bias, delta_softplus, 1, oflex)
         ctx.save_for_backward(u, delta, A, B, C, D, delta_bias, x)
