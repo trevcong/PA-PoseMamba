@@ -86,7 +86,21 @@ def get_pose2D(video_path, output_dir):
     height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
 
     print('\nGenerating 2D pose...')
-    keypoints, scores = hrnet_pose(video_path, det_dim=416, num_peroson=1, gen_output=True)
+    # Try with default threshold first, then lower if needed
+    det_threshold = 0.20
+    max_attempts = 3
+    threshold_levels = [0.20, 0.15, 0.10]
+    
+    for attempt in range(max_attempts):
+        try:
+            keypoints, scores = hrnet_pose(video_path, det_dim=608, num_peroson=5, gen_output=True, det_threshold=threshold_levels[attempt])
+            break
+        except RuntimeError as e:
+            if attempt < max_attempts - 1:
+                print(f'\nAttempt {attempt + 1} failed with threshold {threshold_levels[attempt]}, trying lower threshold {threshold_levels[attempt + 1]}...')
+            else:
+                print(f'\nAll detection attempts failed. Last error: {e}')
+                raise
     keypoints, scores, valid_frames = h36m_coco_format(keypoints, scores)
     
     # Add conf score to the last dim
@@ -103,19 +117,74 @@ def img2video(video_path, output_dir):
     cap = cv2.VideoCapture(video_path)
     fps = int(cap.get(cv2.CAP_PROP_FPS)) + 5
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-
     names = sorted(glob.glob(os.path.join(output_dir + 'pose/', '*.png')))
+    if not names:
+        print("No images found to create video")
+        return
+    
     img = cv2.imread(names[0])
     size = (img.shape[1], img.shape[0])
 
-    videoWrite = cv2.VideoWriter(output_dir + video_name + '.mp4', fourcc, fps, size) 
+    # Try different codecs in order of preference
+    codecs_to_try = [
+        ('avc1', 'H.264'),
+        ('mp4v', 'MPEG-4'),
+        ('XVID', 'XVID'),
+        ('MJPG', 'Motion JPEG')
+    ]
+    
+    videoWrite = None
+    for fourcc_str, codec_name in codecs_to_try:
+        try:
+            fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
+            videoWrite = cv2.VideoWriter(output_dir + video_name + '.mp4', fourcc, fps, size)
+            if videoWrite.isOpened():
+                print(f"Using {codec_name} codec for video output")
+                break
+            else:
+                videoWrite.release()
+                videoWrite = None
+        except Exception as e:
+            if videoWrite:
+                videoWrite.release()
+            videoWrite = None
+            continue
+    
+    if videoWrite is None or not videoWrite.isOpened():
+        # Fallback: Use ffmpeg to create video from images
+        print("OpenCV VideoWriter failed, using ffmpeg instead...")
+        import subprocess
+        import tempfile
+        
+        # Create a temporary file listing all images
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            for name in names:
+                f.write(f"file '{os.path.abspath(name)}'\n")
+            list_file = f.name
+        
+        output_video = output_dir + video_name + '.mp4'
+        cmd = [
+            'ffmpeg', '-f', 'concat', '-safe', '0', '-i', list_file,
+            '-framerate', str(fps), '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+            '-y', output_video
+        ]
+        
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+            print(f"Video created successfully using ffmpeg: {output_video}")
+            os.unlink(list_file)
+            return
+        except subprocess.CalledProcessError as e:
+            print(f"ffmpeg failed: {e.stderr.decode()}")
+            os.unlink(list_file)
+            raise RuntimeError("Failed to create video with both OpenCV and ffmpeg")
 
     for name in names:
         img = cv2.imread(name)
         videoWrite.write(img)
 
     videoWrite.release()
+    print(f"Video created successfully: {output_dir + video_name + '.mp4'}")
 
 
 def showimage(ax, img):
@@ -214,7 +283,7 @@ def get_pose3D(args, video_path, output_dir):
         model_backbone = model_backbone.cuda()
 
     print('Loading checkpoint', args.evaluate)
-    checkpoint = torch.load(args.evaluate, map_location=lambda storage, loc: storage)
+    checkpoint = torch.load(args.evaluate, map_location=lambda storage, loc: storage, weights_only=False)
     model_backbone.load_state_dict(checkpoint['model_pos'], strict=True)
     model = model_backbone
     model.eval()
@@ -334,8 +403,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--video', type=str, default='sample_video.mp4', help='input video')
     parser.add_argument('--gpu', type=str, default='0', help='input video')
-    parser.add_argument("--config", type=str, default="checkpoint/pose3d/PoseMamba_L/config.yaml", help="Path to the config file.")
-    parser.add_argument('-e', '--evaluate', default='checkpoint/pose3d/PoseMamba_L/best_epoch.bin', type=str, metavar='FILENAME', help='checkpoint to evaluate (file name)')
+    parser.add_argument("--config", type=str, default="configs/pose3d/PoseMamba_train_h36m_S.yaml", help="Path to the config file.")
+    parser.add_argument('-e', '--evaluate', default='checkpoint/PoseMamba_S.bin', type=str, metavar='FILENAME', help='checkpoint to evaluate (file name)')
     parser.add_argument('-o', '--out_path', type=str, help='output path')
     parser.add_argument('--pixel', action='store_true', help='align with pixle coordinates')
     parser.add_argument('--focus', type=int, default=None, help='target person id')
@@ -344,8 +413,25 @@ if __name__ == "__main__":
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
 
-    video_path = './demo/video/' + args.video
-    video_name = video_path.split('/')[-1].split('.')[0]
+    # Handle video path - if it's already a full path or contains demo/video, use as is
+    if os.path.isabs(args.video) or os.path.isfile(args.video) or 'demo/video' in args.video:
+        video_path = args.video
+    else:
+        video_path = './demo/video/' + args.video
+    
+    # Ensure video exists
+    if not os.path.isfile(video_path):
+        raise FileNotFoundError(f'Video file not found: {video_path}')
+    
+    # Ensure config exists
+    if not os.path.isfile(args.config):
+        raise FileNotFoundError(f'Config file not found: {args.config}\nAvailable configs: {", ".join(glob.glob("configs/pose3d/*.yaml"))}')
+    
+    # Ensure checkpoint exists
+    if not os.path.isfile(args.evaluate):
+        raise FileNotFoundError(f'Checkpoint file not found: {args.evaluate}\nAvailable checkpoints: {", ".join(glob.glob("checkpoint/*.bin"))}')
+    
+    video_name = os.path.splitext(os.path.basename(video_path))[0]
     output_dir = './demo/output/' + video_name + '/'
     get_pose2D(video_path, output_dir)
     get_pose3D(args, video_path, output_dir)
