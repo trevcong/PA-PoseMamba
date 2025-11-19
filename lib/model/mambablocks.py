@@ -28,12 +28,30 @@ try:
     from .csms6s import SelectiveScanMamba, SelectiveScanCore, SelectiveScanOflex
     from .csms6s import flops_selective_scan_fn, flops_selective_scan_ref, selective_scan_flop_jit
 except:
-    from csm_triton import CrossScanTriton, CrossMergeTriton, CrossScanTriton1b1, getCSM
-    from csm_triton import CrossScanTritonF, CrossMergeTritonF, CrossScanTriton1b1F
-    from csms6s import CrossScan, CrossMerge
-    from csms6s import CrossScan_Ab_1direction, CrossMerge_Ab_1direction, CrossScan_Ab_2direction, CrossMerge_Ab_2direction
-    from csms6s import SelectiveScanMamba, SelectiveScanCore, SelectiveScanOflex
-    from csms6s import flops_selective_scan_fn, flops_selective_scan_ref, selective_scan_flop_jit
+    # Triton not available, use fallback implementations
+    try:
+        from .csm_triton import CrossScanTriton, CrossMergeTriton, CrossScanTriton1b1, getCSM
+        from .csm_triton import CrossScanTritonF, CrossMergeTritonF, CrossScanTriton1b1F
+    except:
+        # Define dummy functions if csm_triton also fails
+        CrossScanTriton = None
+        CrossMergeTriton = None
+        CrossScanTriton1b1 = None
+        CrossScanTritonF = None
+        CrossMergeTritonF = None
+        CrossScanTriton1b1F = None
+        # Create fallback getCSM function that returns csms6s implementations
+        def getCSM(mode=1):
+            if mode == 1:
+                return CrossScan_Ab_1direction, CrossMerge_Ab_1direction
+            elif mode == 2:
+                return CrossScan_Ab_2direction, CrossMerge_Ab_2direction
+            else:
+                return CrossScan, CrossMerge
+    from .csms6s import CrossScan, CrossMerge, CrossScan_fs_ft, CrossScan_fs_bt, CrossScan_bs_ft, CrossScan_bs_bt, CrossMerge_bs_bt, CrossMerge_bs_ft, CrossMerge_fs_bt, CrossMerge_fs_ft, CrossScan_plus_poselimbs, CrossMerge_plus_poselimbs
+    from .csms6s import CrossScan_Ab_1direction, CrossMerge_Ab_1direction, CrossScan_Ab_2direction, CrossMerge_Ab_2direction
+    from .csms6s import SelectiveScanMamba, SelectiveScanCore, SelectiveScanOflex
+    from .csms6s import flops_selective_scan_fn, flops_selective_scan_ref, selective_scan_flop_jit
 
 # =====================================================
 # we have this class as linear and conv init differ from each other

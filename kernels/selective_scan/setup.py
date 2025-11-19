@@ -117,7 +117,7 @@ def get_ext():
             name=names.get(MODE, None),
             sources=sources.get(MODE, None),
             extra_compile_args={
-                "cxx": ["-O3", "-std=c++17"],
+                "cxx": ["-O3", "-std=c++17", "-Wno-narrowing"],
                 "nvcc": [
                             "-O3",
                             "-std=c++17",

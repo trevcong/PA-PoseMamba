@@ -19,6 +19,15 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
+# MLflow for experiment tracking
+try:
+    import mlflow
+    import mlflow.pytorch
+    MLFLOW_AVAILABLE = True
+except ImportError:
+    MLFLOW_AVAILABLE = False
+    print("Warning: MLflow not installed. Install with: pip install mlflow")
+
 from lib.utils.tools import *
 from lib.utils.learning import *
 from lib.utils.utils_data import flip_data
@@ -204,12 +213,16 @@ def train_epoch(args, model_pos, train_loader, losses, optimizer, has_3d, has_gt
             loss_a = loss_angle(predicted_3d_pos, batch_gt)
             loss_av = loss_angle_velocity(predicted_3d_pos, batch_gt)
             
-            w_mpjpe = torch.tensor([1, 1, 2.5, 2.5, 1, 2.5, 2.5, 1, 1, 1, 1.5, 1.5, 4, 4, 1.5, 4, 4]).cuda()
+            w_mpjpe = torch.tensor([1, 1, 2.5, 2.5, 1, 2.5, 2.5, 1, 1, 1, 1.5, 1.5, 4, 4, 1.5, 4, 4])
+            if torch.cuda.is_available():
+                w_mpjpe = w_mpjpe.cuda()
             loss_3d_w = weighted_mpjpe(predicted_3d_pos, batch_gt, w_mpjpe) # 3D weighted
             
             # Temporal Consistency Loss
             dif_seq = predicted_3d_pos[:,1:,:,:] - predicted_3d_pos[:,:-1,:,:]
-            weights_joints = torch.ones_like(dif_seq).cuda()
+            weights_joints = torch.ones_like(dif_seq)
+            if torch.cuda.is_available():
+                weights_joints = weights_joints.cuda()
             weights_mul = w_mpjpe
             assert weights_mul.shape[0] == weights_joints.shape[-2]
             weights_joints = torch.mul(weights_joints.permute(0,1,3,2),weights_mul).permute(0,1,3,2)
@@ -270,6 +283,18 @@ def train_with_config(args, opts):
         if e.errno != errno.EEXIST:
             raise RuntimeError('Unable to create checkpoint directory:', opts.checkpoint)
     train_writer = tensorboardX.SummaryWriter(os.path.join(opts.checkpoint, "logs"))
+    
+    # Initialize MLflow tracking
+    if MLFLOW_AVAILABLE:
+        mlflow.set_experiment("PoseMamba_Training")
+        mlflow_run = mlflow.start_run(run_name=f"{args.backbone}_{opts.checkpoint.split('_')[-1]}")
+        # Log all hyperparameters
+        mlflow.log_params(vars(args))
+        mlflow.log_param("num_gpus", torch.cuda.device_count() if torch.cuda.is_available() else 0)
+        log.info("MLflow tracking enabled")
+    else:
+        mlflow_run = None
+        log.info("MLflow not available - install with: pip install mlflow")
 
     log.info('Loading dataset...')
     trainloader_params = {
@@ -316,18 +341,21 @@ def train_with_config(args, opts):
         # k = torch.cuda.device_count()
         # model_backbone = nn.DataParallel(model_backbone, device_ids=list(range(k)))
         model_backbone = model_backbone.cuda()
+    else:
+        # CPU mode - model stays on CPU
+        pass
 
     if args.finetune:
         if opts.resume or opts.evaluate:
             chk_filename = opts.evaluate if opts.evaluate else opts.resume
             log.info(f'Loading checkpoint{chk_filename}')
-            checkpoint = torch.load(chk_filename, map_location=lambda storage, loc: storage)
+            checkpoint = torch.load(chk_filename, map_location=lambda storage, loc: storage, weights_only=False)
             model_backbone.load_state_dict(checkpoint['model_pos'], strict=True)
             model_pos = model_backbone
         else:
             chk_filename = os.path.join(opts.pretrained, opts.selection)
             log.info(f'Loading checkpoint{chk_filename}')
-            checkpoint = torch.load(chk_filename, map_location=lambda storage, loc: storage)
+            checkpoint = torch.load(chk_filename, map_location=lambda storage, loc: storage, weights_only=False)
             model_backbone.load_state_dict(checkpoint['model_pos'], strict=True)
             model_pos = model_backbone            
     else:
@@ -337,7 +365,7 @@ def train_with_config(args, opts):
         if opts.resume or opts.evaluate:
             chk_filename = opts.evaluate if opts.evaluate else opts.resume
             log.info(f'Loading checkpoint{chk_filename}')
-            checkpoint = torch.load(chk_filename, map_location=lambda storage, loc: storage)
+            checkpoint = torch.load(chk_filename, map_location=lambda storage, loc: storage, weights_only=False)
             if args.backbone == 'MotionAGFormer':
                 model_backbone.load_state_dict(checkpoint['model'], strict=True)
             else:
@@ -390,7 +418,10 @@ def train_with_config(args, opts):
             if args.train_2d and (epoch >= args.pretrain_3d_curriculum):
                 train_epoch(args, model_pos, posetrack_loader_2d, losses, optimizer, has_3d=False, has_gt=True)
                 train_epoch(args, model_pos, instav_loader_2d, losses, optimizer, has_3d=False, has_gt=False)
-            train_epoch(args, model_pos, train_loader_3d, losses, optimizer, has_3d=True, has_gt=True) 
+            # For 2D-only training (gt_2d=True), use has_3d=False to trigger reprojection loss
+            # For 3D training (gt_2d=False), use has_3d=True to use 3D loss
+            has_3d_for_training = not args.gt_2d
+            train_epoch(args, model_pos, train_loader_3d, losses, optimizer, has_3d=has_3d_for_training, has_gt=True) 
             elapsed = (time.time() - start_time) / 60
 
             if args.no_eval:
@@ -420,6 +451,26 @@ def train_with_config(args, opts):
                 train_writer.add_scalar('loss_av', losses['angle_velocity'].avg, epoch + 1)
                 train_writer.add_scalar('loss_total', losses['total'].avg, epoch + 1)
                 
+                # Log to MLflow
+                if MLFLOW_AVAILABLE:
+                    metrics_to_log = {
+                        'val_mpjpe': e1,
+                        'val_p_mpjpe': e2,
+                        'train_loss_total': losses['total'].avg,
+                        'learning_rate': lr,
+                    }
+                    # Add all available losses
+                    if '3d_pos' in losses:
+                        metrics_to_log['train_loss_3d_pos'] = losses['3d_pos'].avg
+                    if '2d_proj' in losses:
+                        metrics_to_log['train_loss_2d_proj'] = losses['2d_proj'].avg
+                    if '3d_scale' in losses:
+                        metrics_to_log['train_loss_3d_scale'] = losses['3d_scale'].avg
+                    if '3d_velocity' in losses:
+                        metrics_to_log['train_loss_3d_velocity'] = losses['3d_velocity'].avg
+                    
+                    mlflow.log_metrics(metrics_to_log, step=epoch + 1)
+                
             # Decay learning rate exponentially
             lr *= lr_decay
             for param_group in optimizer.param_groups:
@@ -433,12 +484,25 @@ def train_with_config(args, opts):
             save_checkpoint(chk_path_latest, epoch, lr, optimizer, model_pos, min_loss)
             if (epoch + 1) % args.checkpoint_frequency == 0:
                 save_checkpoint(chk_path, epoch, lr, optimizer, model_pos, min_loss)
-            if e1 < min_loss:
+            if not args.no_eval and e1 < min_loss:
                 min_loss = e1
                 save_checkpoint(chk_path_best, epoch, lr, optimizer, model_pos, min_loss)
+                # Log best checkpoint to MLflow
+                if MLFLOW_AVAILABLE:
+                    mlflow.log_param('best_checkpoint_path', chk_path_best)
+                    mlflow.log_metric('best_mpjpe', e1, step=epoch + 1)
                 
     if opts.evaluate:
         e1, e2, results_all = evaluate(args, model_pos, test_loader, datareader)
+    
+    # End MLflow run
+    if MLFLOW_AVAILABLE and mlflow_run:
+        # Log final artifacts
+        mlflow.log_artifacts(opts.checkpoint, "checkpoints")
+        mlflow.log_artifact(os.path.join(opts.checkpoint, 'log.txt'), "logs")
+        mlflow.log_artifact(os.path.join(opts.checkpoint, 'config.yaml'), "configs")
+        mlflow.end_run()
+        log.info("MLflow run completed")
 
 if __name__ == "__main__":
     opts = parse_args()

@@ -217,7 +217,7 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
 
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing
-    at::cuda::CUDAGuard device_guard{(char)u.get_device()};
+    at::cuda::CUDAGuard device_guard{static_cast<c10::DeviceIndex>(u.get_device())};
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(u.scalar_type(), "selective_scan_fwd", [&] {
         if (!out_float) {
@@ -334,7 +334,7 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
 
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing
-    at::cuda::CUDAGuard device_guard{(char)u.get_device()};
+    at::cuda::CUDAGuard device_guard{static_cast<c10::DeviceIndex>(u.get_device())};
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(u.scalar_type(), "selective_scan_bwd", [&] {
         if (output_type == input_type) {

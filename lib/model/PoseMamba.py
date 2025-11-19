@@ -69,7 +69,7 @@ class  PoseMamba(nn.Module):
                 mlp_ratio = mlp_ratio, 
                 drop_path=dpr[i], 
                 norm_layer=norm_layer,
-                forward_type='v2_plus_poselimbs'
+                forward_type='v3'  # Use SelectiveScanOflex (compiled CUDA kernels) - compatible with pose data format
                 )
             for i in range(depth)])
 
@@ -79,7 +79,7 @@ class  PoseMamba(nn.Module):
                 mlp_ratio = mlp_ratio, 
                 drop_path=dpr[i], 
                 norm_layer=norm_layer,
-                forward_type='v2_plus_poselimbs'
+                forward_type='v3'  # Use SelectiveScanOflex (compiled CUDA kernels) - compatible with pose data format
                 )
             for i in range(depth)])
 
