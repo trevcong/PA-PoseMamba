@@ -25,7 +25,7 @@ This repository has been tested and optimized for **NVIDIA DGX Spark** systems w
 docker run -it --gpus all \
   --shm-size=8g \
   --security-opt label=disable \
-  -v /home/tcong:/workspace \
+  -v /home/<$$>:/workspace \
   --name posemamba \
   nvcr.io/nvidia/pytorch:25.09-py3 \
   /bin/bash
@@ -34,7 +34,7 @@ docker run -it --gpus all \
 **Key Settings:**
 - `--gpus all`: Enables GPU access
 - `--shm-size=8g`: Required for DataLoader workers
-- `-v /home/tcong:/workspace`: Mounts your project directory
+- `-v /home/<$$>:/workspace`: Mounts your project directory
 - Base image: `nvcr.io/nvidia/pytorch:25.09-py3` (PyTorch 2.9.0, CUDA 13.0.1, Python 3.12.3)
 
 **2. Inside Container - Install Dependencies:**
@@ -161,7 +161,7 @@ PYTHONPATH=. python train.py \
 
 ```bash
 # In another terminal (on host)
-cd /home/tcong/Documents/realposemamba/PoseMamba
+cd /home/<$$PoseMamba$$>
 mlflow ui --backend-store-uri ./mlruns
 # Open: http://localhost:5000
 ```
@@ -231,14 +231,9 @@ Added `weights_only=False` to all `torch.load()` calls for PyTorch 2.6+ compatib
 ### Training Speed (DGX Spark, NVIDIA GB10)
 
 **With Compiled CUDA Kernels:**
-- **Iteration Time:** ~0.5-1.0 seconds per batch
 - **GPU Utilization:** ~92%
 - **Throughput:** ~4-8 samples/second
 - **Epoch Time:** ~20-25 minutes per epoch
-
-**Memory Usage:**
-- **GPU Memory:** ~2.7 GB (model + active batch)
-- **System RAM:** ~117 GB (dataset + DataLoader workers + cache)
 
 ### Training Results (PoseMamba-S, 120 epochs)
 
@@ -344,7 +339,7 @@ docker exec posemamba nvidia-smi
 **Solution:**
 ```bash
 # On host machine (not in Docker)
-cd /home/tcong/Documents/realposemamba/PoseMamba
+cd /home/<$$PoseMamba$$>
 mlflow ui --backend-store-uri ./mlruns
 ```
 
